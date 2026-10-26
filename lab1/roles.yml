@@ -1,0 +1,159 @@
+---
+- name: Manage MongoDB users and roles (part 2)
+  hosts: all
+  become: true
+  gather_facts: false
+  vars:
+    ansible_python_interpreter: /opt/nrdb-venv/bin/python
+    study_db: university
+    student_name: trainee
+    reader_name: observer
+    editor_actions: [find, insert, update]
+
+  vars_prompt:
+    - name: admin_password
+      prompt: "MongoDB administrator password (choose once, then reuse)"
+      private: true
+    - name: study_password
+      prompt: "Password for the study users (used when creating them)"
+      private: true
+
+  module_defaults:
+    community.mongodb.mongodb_user:
+      login_host: 127.0.0.1
+      login_port: 27017
+    community.mongodb.mongodb_role:
+      login_host: 127.0.0.1
+      login_port: 27017
+
+  tasks:
+    - name: Prepare authorization on the instance from part 1
+      tags: [bootstrap]
+      block:
+        - name: Create the first administrator once
+          community.mongodb.mongodb_user:
+            database: admin
+            name: lab_admin
+            password: "{{ admin_password }}"
+            roles: [root]
+            create_for_localhost_exception: /var/lib/mongodb/.lab-admin-created
+            state: present
+
+        - name: Add the security section
+          ansible.builtin.lineinfile:
+            path: /etc/mongod.conf
+            regexp: '^security:'
+            line: 'security:'
+          notify: Restart MongoDB
+
+        - name: Enable permission enforcement
+          ansible.builtin.lineinfile:
+            path: /etc/mongod.conf
+            regexp: '^  authorization:'
+            insertafter: '^security:'
+            line: '  authorization: enabled'
+          notify: Restart MongoDB
+
+        - name: Apply authorization
+          ansible.builtin.meta: flush_handlers
+
+        - name: Wait for MongoDB
+          ansible.builtin.wait_for:
+            host: 127.0.0.1
+            port: 27017
+            timeout: 30
+
+    - name: Perform operations as the administrator
+      module_defaults:
+        community.mongodb.mongodb_user:
+          login_host: 127.0.0.1
+          login_user: lab_admin
+          login_password: "{{ admin_password }}"
+          login_database: admin
+          database: "{{ study_db }}"
+          update_password: on_create
+        community.mongodb.mongodb_role:
+          login_host: 127.0.0.1
+          login_user: lab_admin
+          login_password: "{{ admin_password }}"
+          login_database: admin
+          database: "{{ study_db }}"
+      block:
+        - name: Create two roles with different permissions
+          community.mongodb.mongodb_role:
+            name: "{{ item.name }}"
+            privileges:
+              - resource: {db: "{{ study_db }}", collection: ""}
+                actions: "{{ item.actions }}"
+            state: present
+          loop:
+            - {name: course_reader, actions: [find]}
+            - {name: course_editor, actions: "{{ editor_actions }}"}
+          tags: [roles]
+
+        - name: Create study users and assign initial roles
+          community.mongodb.mongodb_user:
+            name: "{{ item }}"
+            password: "{{ study_password }}"
+            roles: [course_reader]
+            state: present
+          loop: ["{{ student_name }}", "{{ reader_name }}"]
+          tags: [users]
+
+        - name: Grant the editing role in addition to reading
+          community.mongodb.mongodb_user:
+            name: "{{ student_name }}"
+            roles: [course_reader, course_editor]
+            state: present
+          tags: [never, grant]
+
+        - name: Revoke editing while keeping reading
+          community.mongodb.mongodb_user:
+            name: "{{ student_name }}"
+            roles: [course_reader]
+            state: present
+          tags: [never, revoke]
+
+        - name: Replace the existing editor role permissions
+          community.mongodb.mongodb_role:
+            name: course_editor
+            privileges:
+              - resource: {db: "{{ study_db }}", collection: ""}
+                actions: "{{ editor_actions }}"
+            state: present
+          tags: [never, permissions]
+
+        - name: Create a role that can read only the courses collection
+          community.mongodb.mongodb_role:
+            name: courses_viewer
+            privileges:
+              - resource: {db: "{{ study_db }}", collection: courses}
+                actions: [find]
+            state: present
+          tags: [collection]
+
+        - name: Give a separate user only the collection role
+          community.mongodb.mongodb_user:
+            name: courses_guest
+            password: "{{ study_password }}"
+            roles: [courses_viewer]
+            state: present
+          tags: [collection]
+
+        - name: Delete the collection user
+          community.mongodb.mongodb_user:
+            name: courses_guest
+            state: absent
+          tags: [never, delete]
+
+        - name: Delete its role
+          community.mongodb.mongodb_role:
+            name: courses_viewer
+            state: absent
+          tags: [never, delete]
+
+  handlers:
+    - name: Restart MongoDB
+      ansible.builtin.systemd_service:
+        name: mongod
+        state: restarted

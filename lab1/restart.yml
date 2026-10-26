@@ -1,0 +1,30 @@
+---
+- name: Restart MongoDB and check availability
+  hosts: all
+  become: true
+  gather_facts: false
+  vars:
+    mongodb_action: restarted
+
+  tasks:
+    - name: Validate the requested operation
+      ansible.builtin.assert:
+        that:
+          - mongodb_action in ['started', 'stopped', 'restarted']
+        fail_msg: "mongodb_action: started, stopped or restarted."
+
+    - name: Manage the MongoDB service
+      ansible.builtin.systemd_service:
+        name: mongod
+        state: "{{ mongodb_action }}"
+
+    - name: Check the TCP port after the operation
+      ansible.builtin.wait_for:
+        host: 127.0.0.1
+        port: 27017
+        state: "{{ 'stopped' if mongodb_action == 'stopped' else 'started' }}"
+        timeout: 30
+
+    - name: Report the result
+      ansible.builtin.debug:
+        msg: "{{ 'MongoDB stopped, port 27017 closed.' if mongodb_action == 'stopped' else 'MongoDB started, TCP 127.0.0.1:27017.' }}"

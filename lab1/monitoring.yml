@@ -1,0 +1,119 @@
+---
+- name: Prepare MongoDB monitoring and k6 access (part 4)
+  hosts: all
+  become: true
+  vars:
+    ansible_python_interpreter: /opt/nrdb-venv/bin/python
+    exporter_archive: "{{ playbook_dir }}/mongodb-exporter.tar.gz"
+    monitoring_dir: "{{ playbook_dir }}/monitoring"
+    # Keep a stable generated password outside Git; no extra password prompts.
+    monitoring_password: "{{ lookup('ansible.builtin.password', monitoring_dir ~ '/.password length=24 chars=ascii_letters,digits') }}"
+
+  vars_prompt:
+    - name: admin_password
+      prompt: "MongoDB lab_admin password"
+      private: true
+
+  tasks:
+    - name: Create an exporter user and a separate load user
+      community.mongodb.mongodb_user:
+        login_host: 127.0.0.1
+        login_user: lab_admin
+        login_password: "{{ admin_password }}"
+        login_database: admin
+        database: "{{ item.database }}"
+        name: "{{ item.name }}"
+        password: "{{ monitoring_password }}"
+        roles: "{{ item.roles }}"
+        state: present
+      loop:
+        - name: metrics_exporter
+          database: admin
+          roles:
+            - {role: clusterMonitor, db: admin}
+            - {role: read, db: local}
+        - name: k6_load
+          database: university
+          roles:
+            - {role: readWrite, db: university}
+      no_log: true
+
+    - name: Create the exporter directory
+      ansible.builtin.file:
+        path: /opt/mongodb-exporter
+        state: directory
+        mode: "0755"
+
+    - name: Install Percona MongoDB Exporter from the local archive
+      ansible.builtin.unarchive:
+        src: "{{ exporter_archive }}"
+        dest: /opt/mongodb-exporter
+        extra_opts: [--strip-components=1]
+        owner: root
+        group: root
+      notify: Restart exporter
+
+    - name: Create an exporter service account
+      ansible.builtin.user:
+        name: mongodb-exporter
+        system: true
+        create_home: false
+        shell: /usr/sbin/nologin
+
+    - name: Store exporter credentials
+      ansible.builtin.copy:
+        dest: /etc/mongodb-exporter.env
+        mode: "0600"
+        content: |
+          MONGODB_USER=metrics_exporter
+          MONGODB_PASSWORD={{ monitoring_password }}
+      no_log: true
+      notify: Restart exporter
+
+    - name: Configure the exporter service beside the native MongoDB instance
+      ansible.builtin.copy:
+        dest: /etc/systemd/system/mongodb-exporter.service
+        mode: "0644"
+        content: |
+          [Unit]
+          Description=Percona MongoDB Exporter
+          After=network.target mongod.service
+
+          [Service]
+          User=mongodb-exporter
+          EnvironmentFile=/etc/mongodb-exporter.env
+          ExecStart=/opt/mongodb-exporter/mongodb_exporter --mongodb.uri=mongodb://127.0.0.1:27017/admin --mongodb.direct-connect --mongodb.global-conn-pool --collector.diagnosticdata --collector.dbstats --web.listen-address=0.0.0.0:9216
+          Restart=on-failure
+
+          [Install]
+          WantedBy=multi-user.target
+      notify: Restart exporter
+
+    - name: Start exporter and enable automatic startup
+      ansible.builtin.systemd_service:
+        name: mongodb-exporter
+        daemon_reload: true
+        enabled: true
+        state: started
+
+    - name: Apply exporter changes
+      ansible.builtin.meta: flush_handlers
+
+    - name: Write local Docker and k6 settings
+      ansible.builtin.copy:
+        dest: "{{ monitoring_dir }}/.env"
+        mode: "0600"
+        content: |
+          MONGODB_EXPORTER_HOST={{ ansible_default_ipv4.address }}
+          MONGODB_PASSWORD={{ monitoring_password }}
+          GRAFANA_PASSWORD={{ monitoring_password }}
+      delegate_to: localhost
+      become: false
+      no_log: true
+
+  handlers:
+    - name: Restart exporter
+      ansible.builtin.systemd_service:
+        name: mongodb-exporter
+        daemon_reload: true
+        state: restarted

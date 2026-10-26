@@ -1,0 +1,34 @@
+name: nrdb-monitoring
+services:
+  prometheus:
+    image: prom/prometheus:v3.5.0
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.retention.time=7d
+    extra_hosts:
+      - "mongodb-wsl:${MONGODB_EXPORTER_HOST:?Run monitoring.yml first}"
+    ports:
+      - "127.0.0.1:9090:9090"
+    volumes:
+      - ./prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus-data:/prometheus
+    restart: unless-stopped
+
+  grafana:
+    image: grafana/grafana:12.2.0
+    environment:
+      GF_SECURITY_ADMIN_USER: admin
+      GF_SECURITY_ADMIN_PASSWORD: "${GRAFANA_PASSWORD:?Run monitoring.yml first}"
+      GF_USERS_ALLOW_SIGN_UP: "false"
+    ports:
+      - "127.0.0.1:3000:3000"
+    volumes:
+      - ./datasource.yml:/etc/grafana/provisioning/datasources/default.yml:ro
+      - ./dashboard-provider.yml:/etc/grafana/provisioning/dashboards/default.yml:ro
+      - ./dashboard.json:/var/lib/grafana/dashboards/mongodb.json:ro
+      - grafana-data:/var/lib/grafana
+    restart: unless-stopped
+
+volumes:
+  prometheus-data:
+  grafana-data:
