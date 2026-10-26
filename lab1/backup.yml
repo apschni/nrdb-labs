@@ -1,0 +1,127 @@
+---
+- name: MongoDB backups and recovery (part 3)
+  hosts: all
+  become: true
+  gather_facts: false
+  vars:
+    ansible_python_interpreter: /usr/bin/python3
+    tools_archive: "{{ playbook_dir }}/database-tools.tgz"
+    backup_root: /var/backups/mongodb
+    study_db: university
+    study_databases: [university]
+    backup_mode: one
+    restore_collection: courses
+    backup_path: ""
+
+  vars_prompt:
+    - name: admin_password
+      prompt: "MongoDB lab_admin password"
+      private: true
+
+  tasks:
+    - name: Prepare local Database Tools and backup storage
+      tags: [always]
+      block:
+        - name: Create directories
+          ansible.builtin.file:
+            path: "{{ item }}"
+            state: directory
+            mode: "0700"
+          loop: [/opt/mongodb-tools, "{{ backup_root }}"]
+
+        - name: Install Database Tools from the local archive once
+          ansible.builtin.unarchive:
+            src: "{{ tools_archive }}"
+            dest: /opt/mongodb-tools
+            extra_opts: [--strip-components=1]
+            creates: /opt/mongodb-tools/bin/mongodump
+
+        - name: Create a temporary credentials file
+          ansible.builtin.tempfile:
+            state: file
+            prefix: mongodb-credentials-
+          register: credentials
+
+    - name: Run the requested operation and remove temporary credentials
+      block:
+        - name: Store the password outside command line arguments
+          ansible.builtin.copy:
+            dest: "{{ credentials.path }}"
+            mode: "0600"
+            content: "{{ {'password': admin_password} | to_nice_yaml }}"
+          no_log: true
+          tags: [always]
+
+        - name: Back up one database or all listed study databases
+          tags: [backup]
+          block:
+            - name: Validate backup selection
+              ansible.builtin.assert:
+                that:
+                  - backup_mode in ['one', 'all']
+                  - study_databases | length > 0
+                  - "(study_databases + [study_db]) | intersect(['admin', 'config', 'local']) | length == 0"
+
+            - name: Allocate a unique directory for this backup
+              ansible.builtin.tempfile:
+                state: directory
+                path: "{{ backup_root }}"
+                prefix: "{{ backup_mode }}-"
+              register: new_backup
+
+            - name: Save each selected database
+              ansible.builtin.command:
+                argv:
+                  - /opt/mongodb-tools/bin/mongodump
+                  - "--config={{ credentials.path }}"
+                  - --host=127.0.0.1
+                  - --username=lab_admin
+                  - --authenticationDatabase=admin
+                  - "--db={{ item }}"
+                  - "--out={{ new_backup.path }}"
+                  - --gzip
+              loop: "{{ study_databases if backup_mode == 'all' else [study_db] }}"
+              changed_when: true
+
+            - name: Show the backup location on the MongoDB host
+              ansible.builtin.debug:
+                msg: "Backup saved to {{ new_backup.path }}. Previous copies are preserved."
+
+        - name: Restore a deleted collection from a chosen backup
+          tags: [never, restore]
+          block:
+            - name: Require a backup path
+              ansible.builtin.assert:
+                that: backup_path | length > 0
+                fail_msg: "Pass -e backup_path=/var/backups/mongodb/one-..."
+
+            - name: Locate the selected collection in the backup
+              ansible.builtin.stat:
+                path: "{{ backup_path }}/{{ study_db }}/{{ restore_collection }}.bson.gz"
+              register: collection_backup
+
+            - name: Reject a backup without the requested collection
+              ansible.builtin.assert:
+                that: collection_backup.stat.exists
+                fail_msg: "The backup does not contain {{ study_db }}.{{ restore_collection }}."
+
+            - name: Restore only the selected collection
+              ansible.builtin.command:
+                argv:
+                  - /opt/mongodb-tools/bin/mongorestore
+                  - "--config={{ credentials.path }}"
+                  - --host=127.0.0.1
+                  - --username=lab_admin
+                  - --authenticationDatabase=admin
+                  - "--nsInclude={{ study_db }}.{{ restore_collection }}"
+                  - --gzip
+                  - --stopOnError
+                  - "{{ backup_path }}"
+              changed_when: true
+
+      always:
+        - name: Remove the temporary credentials file
+          ansible.builtin.file:
+            path: "{{ credentials.path }}"
+            state: absent
+          tags: [always]

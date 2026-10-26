@@ -1,0 +1,115 @@
+---
+- name: Install MongoDB from a local archive and start it
+  hosts: all
+  become: true
+  vars:
+    mongodb_archive: "{{ playbook_dir }}/mongodb.tgz"
+
+  tasks:
+
+    - name: Create the installation directory
+      ansible.builtin.file:
+        path: /opt/mongodb
+        state: directory
+        mode: "0755"
+
+    - name: Extract the local archive onto the target host
+      ansible.builtin.unarchive:
+        src: "{{ mongodb_archive }}"
+        dest: /opt/mongodb
+        extra_opts: [--strip-components=1]
+        owner: root
+        group: root
+      notify: Restart MongoDB
+
+    - name: Check the binary and its system libraries
+      ansible.builtin.command: /opt/mongodb/bin/mongod --version
+      changed_when: false
+
+    - name: Create the service user
+      ansible.builtin.user:
+        name: mongodb
+        system: true
+        create_home: false
+        shell: /usr/sbin/nologin
+
+    - name: Prepare data and log directories
+      ansible.builtin.file:
+        path: "{{ item }}"
+        state: directory
+        owner: mongodb
+        group: mongodb
+        mode: "0750"
+      loop:
+        - /var/lib/mongodb
+        - /var/log/mongodb
+
+    - name: Write the MongoDB configuration
+      ansible.builtin.copy:
+        dest: /etc/mongod.conf
+        force: false
+        owner: root
+        group: root
+        mode: "0644"
+        content: |
+          storage:
+            dbPath: /var/lib/mongodb
+          systemLog:
+            destination: file
+            path: /var/log/mongodb/mongod.log
+            logAppend: true
+          net:
+            bindIp: 127.0.0.1
+            port: 27017
+      notify: Restart MongoDB
+
+    - name: Create the systemd service
+      ansible.builtin.copy:
+        dest: /etc/systemd/system/mongod.service
+        owner: root
+        group: root
+        mode: "0644"
+        content: |
+          [Unit]
+          Description=MongoDB Database Server
+          After=network.target
+
+          [Service]
+          Type=simple
+          User=mongodb
+          Group=mongodb
+          ExecStart=/opt/mongodb/bin/mongod --config /etc/mongod.conf
+          Restart=on-failure
+          LimitNOFILE=64000
+          TimeoutStopSec=120
+
+          [Install]
+          WantedBy=multi-user.target
+      notify: Restart MongoDB
+
+    - name: Enable automatic startup and start MongoDB
+      ansible.builtin.systemd_service:
+        name: mongod
+        daemon_reload: true
+        enabled: true
+        state: started
+
+    - name: Apply changes before checking
+      ansible.builtin.meta: flush_handlers
+
+    - name: Check that MongoDB accepts TCP connections
+      ansible.builtin.wait_for:
+        host: 127.0.0.1
+        port: 27017
+        timeout: 30
+
+    - name: Report the result
+      ansible.builtin.debug:
+        msg: "MongoDB launched: TCP 127.0.0.1:27017"
+
+  handlers:
+    - name: Restart MongoDB
+      ansible.builtin.systemd_service:
+        name: mongod
+        daemon_reload: true
+        state: restarted

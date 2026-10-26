@@ -1,6 +1,10 @@
 *.pdf
+*.tgz
+*.tar.gz
 .env
+.password
 .vscode/
 __pycache__/
 .venv/
 .DS_Store
+lab1/monitoring/bin/
