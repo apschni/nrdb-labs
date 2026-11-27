@@ -1,0 +1,73 @@
+name: nrdb-lab3
+
+services:
+  redis:
+    image: redis:8.2.3-alpine
+    command: redis-server --maxmemory 64mb --maxmemory-policy noeviction --save "" --appendonly no
+    healthcheck:
+      test: [CMD, redis-cli, ping]
+      interval: 5s
+      timeout: 2s
+      retries: 10
+    mem_limit: 128m
+
+  backend:
+    image: nrdb-lab3-gateway
+    pull_policy: never
+    command: python backend.py
+    mem_limit: 128m
+
+  gateway:
+    build: .
+    image: nrdb-lab3-gateway
+    ports:
+      - "8080:8000"
+    healthcheck:
+      test: [CMD, python, -c, "import urllib.request; urllib.request.urlopen('http://localhost:8000/health', timeout=2)"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    mem_limit: 192m
+
+  redis-exporter:
+    image: oliver006/redis_exporter:v1.93.0
+    environment:
+      REDIS_ADDR: redis://redis:6379
+    mem_limit: 64m
+
+  prometheus:
+    image: prom/prometheus:v3.5.0
+    command: --config.file=/etc/prometheus/prometheus.yml --storage.tsdb.retention.time=24h
+    volumes:
+      - ./monitoring/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus-data:/prometheus
+    ports:
+      - "9090:9090"
+    mem_limit: 256m
+
+  grafana:
+    image: grafana/grafana:12.2.0
+    environment:
+      GF_SECURITY_ADMIN_USER: admin
+      GF_SECURITY_ADMIN_PASSWORD: admin
+      GF_USERS_ALLOW_SIGN_UP: "false"
+    volumes:
+      - ./monitoring/grafana.yml:/etc/grafana/provisioning/datasources/redis.yml:ro
+      - ./monitoring/dashboard-provider.yml:/etc/grafana/provisioning/dashboards/redis.yml:ro
+      - ./monitoring/dashboard.json:/var/lib/grafana/dashboards/redis.json:ro
+      - grafana-data:/var/lib/grafana
+    ports:
+      - "3000:3000"
+    mem_limit: 256m
+
+  load:
+    image: grafana/k6:1.3.0
+    profiles: [tools]
+    command: run /load.js
+    volumes:
+      - ./monitoring/load.js:/load.js:ro
+    mem_limit: 320m
+
+volumes:
+  prometheus-data:
+  grafana-data:
