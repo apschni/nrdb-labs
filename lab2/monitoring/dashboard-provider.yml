@@ -1,0 +1,7 @@
+apiVersion: 1
+providers:
+  - name: OpenSearch
+    folder: NRDB
+    type: file
+    options:
+      path: /var/lib/grafana/dashboards

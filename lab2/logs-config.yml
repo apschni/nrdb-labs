@@ -1,0 +1,49 @@
+log_policy:
+  policy:
+    default_state: hot
+    ism_template:
+      - index_patterns: [logs]
+        priority: 100
+    states:
+      - name: hot
+        actions:
+          - rollover:
+              min_size: 1mb
+              min_index_age: 1m
+        transitions:
+          - state_name: warm
+      - name: warm
+        actions:
+          - allocation:
+              require:
+                tier: warm
+              wait_for: true
+        transitions:
+          - state_name: delete
+            conditions:
+              min_index_age: 10m
+      - name: delete
+        actions:
+          - delete: {}
+        transitions: []
+
+log_template:
+  index_patterns: [logs]
+  priority: 100
+  data_stream: {}
+  template:
+    settings:
+      number_of_shards: 1
+      number_of_replicas: 0
+      index.routing.allocation.require.tier: hot
+    mappings:
+      dynamic: strict
+      properties:
+        '@timestamp': {type: date}
+        remote_addr: {type: ip}
+        method: {type: keyword}
+        uri: {type: keyword, ignore_above: 4096}
+        status: {type: integer}
+        bytes: {type: long}
+        request_time: {type: float}
+        user_agent: {type: keyword, ignore_above: 1024}

@@ -1,0 +1,208 @@
+- name: Deploy OpenSearch with TLS
+  hosts: all
+  gather_facts: false
+  vars_files: [vars.yml]
+  vars:
+    ansible_python_interpreter: /usr/bin/python3
+  tasks:
+    - name: Install the certificate module dependency
+      ansible.builtin.apt:
+        name: python3-cryptography
+        state: present
+        update_cache: true
+        cache_valid_time: 3600
+      become: true
+
+    - name: Create local directories
+      ansible.builtin.file:
+        path: "{{ runtime_dir }}/{{ item }}"
+        state: directory
+        mode: '0755'
+      loop: [pki, certs/hot, certs/warm, passwords]
+
+    - name: Create the CA private key
+      community.crypto.openssl_privatekey:
+        path: "{{ runtime_dir }}/pki/ca-key.pem"
+        size: 3072
+        format: pkcs8
+        mode: '0600'
+
+    - name: Create the CA signing request
+      community.crypto.openssl_csr:
+        path: "{{ runtime_dir }}/pki/ca.csr"
+        privatekey_path: "{{ runtime_dir }}/pki/ca-key.pem"
+        common_name: ca
+        use_common_name_for_san: false
+        basic_constraints: ['CA:TRUE']
+        basic_constraints_critical: true
+        key_usage: [digitalSignature, keyCertSign, cRLSign]
+        key_usage_critical: true
+        create_subject_key_identifier: true
+
+    - name: Sign the CA certificate
+      community.crypto.x509_certificate:
+        path: "{{ runtime_dir }}/pki/ca.pem"
+        privatekey_path: "{{ runtime_dir }}/pki/ca-key.pem"
+        csr_path: "{{ runtime_dir }}/pki/ca.csr"
+        provider: selfsigned
+        selfsigned_create_authority_key_identifier: true
+        selfsigned_not_after: '+365d'
+        mode: '0644'
+
+    - name: Create private keys for the nodes and administrator
+      community.crypto.openssl_privatekey:
+        path: "{{ runtime_dir }}/pki/{{ item.name }}-key.pem"
+        size: 3072
+        format: pkcs8
+        mode: '0600'
+      loop: "{{ nodes + [{'name': 'admin', 'address': '127.0.0.1'}] }}"
+
+    - name: Create node certificate signing requests
+      community.crypto.openssl_csr:
+        path: "{{ runtime_dir }}/pki/{{ item.name }}.csr"
+        privatekey_path: "{{ runtime_dir }}/pki/{{ item.name }}-key.pem"
+        common_name: "{{ item.name }}"
+        subject_alt_name:
+          - "DNS:{{ item.name }}"
+          - DNS:localhost
+          - IP:127.0.0.1
+          - "IP:{{ item.address }}"
+        basic_constraints: ['CA:FALSE']
+        basic_constraints_critical: true
+        key_usage: [digitalSignature, keyEncipherment]
+        key_usage_critical: true
+        extended_key_usage: [serverAuth, clientAuth]
+        create_subject_key_identifier: true
+      loop: "{{ nodes }}"
+
+    - name: Create the administrator certificate signing request
+      community.crypto.openssl_csr:
+        path: "{{ runtime_dir }}/pki/admin.csr"
+        privatekey_path: "{{ runtime_dir }}/pki/admin-key.pem"
+        common_name: admin
+        use_common_name_for_san: false
+        basic_constraints: ['CA:FALSE']
+        basic_constraints_critical: true
+        key_usage: [digitalSignature]
+        key_usage_critical: true
+        extended_key_usage: [clientAuth]
+        create_subject_key_identifier: true
+
+    - name: Sign certificates with the local CA
+      community.crypto.x509_certificate:
+        path: "{{ runtime_dir }}/pki/{{ item.name }}.pem"
+        csr_path: "{{ runtime_dir }}/pki/{{ item.name }}.csr"
+        ownca_path: "{{ runtime_dir }}/pki/ca.pem"
+        ownca_privatekey_path: "{{ runtime_dir }}/pki/ca-key.pem"
+        provider: ownca
+        ownca_create_authority_key_identifier: true
+        ownca_not_after: '+365d'
+        mode: '0600'
+      loop: "{{ nodes + [{'name': 'admin', 'address': '127.0.0.1'}] }}"
+
+    - name: Copy the public CA to each node
+      ansible.builtin.copy:
+        src: "{{ runtime_dir }}/pki/ca.pem"
+        dest: "{{ runtime_dir }}/certs/{{ item.name }}/ca.pem"
+        mode: '0600'
+      loop: "{{ nodes }}"
+
+    - name: Copy each node's own certificate
+      ansible.builtin.copy:
+        src: "{{ runtime_dir }}/pki/{{ item.name }}.pem"
+        dest: "{{ runtime_dir }}/certs/{{ item.name }}/{{ item.name }}.pem"
+        mode: '0600'
+      loop: "{{ nodes }}"
+
+    - name: Copy each node's own private key
+      ansible.builtin.copy:
+        src: "{{ runtime_dir }}/pki/{{ item.name }}-key.pem"
+        dest: "{{ runtime_dir }}/certs/{{ item.name }}/{{ item.name }}-key.pem"
+        mode: '0600'
+      loop: "{{ nodes }}"
+
+    - name: Render the node configuration
+      ansible.builtin.template:
+        src: opensearch.yml.j2
+        dest: "{{ runtime_dir }}/{{ item.name }}.yml"
+        mode: '0600'
+      loop: "{{ nodes }}"
+
+    - name: Write empty initial users
+      ansible.builtin.copy:
+        dest: "{{ runtime_dir }}/internal_users.yml"
+        content: |
+          _meta:
+            type: internalusers
+            config_version: 2
+        mode: '0600'
+
+    - name: Map the administrator and Dashboards service roles
+      ansible.builtin.copy:
+        dest: "{{ runtime_dir }}/roles_mapping.yml"
+        content: |
+          _meta:
+            type: rolesmapping
+            config_version: 2
+          all_access:
+            users: [admin]
+          kibana_server:
+            users: [kibanaserver]
+        mode: '0600'
+
+    - name: Build and start the two nodes
+      ansible.builtin.command: docker compose up -d --build --force-recreate hot warm
+      args:
+        chdir: "{{ playbook_dir }}"
+      changed_when: true
+
+    - name: Wait for the cluster
+      ansible.builtin.uri:
+        url: "{{ opensearch_url }}/_cluster/health?wait_for_nodes=2&wait_for_status=yellow&timeout=5s"
+        ca_path: "{{ runtime_dir }}/pki/ca.pem"
+        client_cert: "{{ runtime_dir }}/pki/admin.pem"
+        client_key: "{{ runtime_dir }}/pki/admin-key.pem"
+        return_content: true
+      register: cluster
+      until: cluster.status == 200 and cluster.json.number_of_nodes == 2 and not cluster.json.timed_out
+      retries: 120
+      delay: 5
+
+    - name: Read the existing service accounts
+      ansible.builtin.uri:
+        url: "{{ opensearch_url }}/_plugins/_security/api/internalusers/{{ item }}"
+        ca_path: "{{ runtime_dir }}/pki/ca.pem"
+        client_cert: "{{ runtime_dir }}/pki/admin.pem"
+        client_key: "{{ runtime_dir }}/pki/admin-key.pem"
+        status_code: [200, 404]
+      loop: [admin, kibanaserver]
+      register: service_accounts
+      no_log: true
+
+    - name: Create missing service accounts
+      ansible.builtin.uri:
+        url: "{{ opensearch_url }}/_plugins/_security/api/internalusers/{{ item.item }}"
+        method: PUT
+        ca_path: "{{ runtime_dir }}/pki/ca.pem"
+        client_cert: "{{ runtime_dir }}/pki/admin.pem"
+        client_key: "{{ runtime_dir }}/pki/admin-key.pem"
+        body_format: json
+        body:
+          password: "{{ passwords[item.item] }}"
+        status_code: [200, 201]
+      loop: "{{ service_accounts.results }}"
+      when: item.status == 404
+      no_log: true
+
+    - name: Render the Dashboards configuration
+      ansible.builtin.template:
+        src: dashboards.yml.j2
+        dest: "{{ runtime_dir }}/dashboards.yml"
+        mode: '0600'
+      no_log: true
+
+    - name: Start OpenSearch Dashboards
+      ansible.builtin.command: docker compose up -d --force-recreate dashboards
+      args:
+        chdir: "{{ playbook_dir }}"
+      changed_when: true

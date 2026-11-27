@@ -1,0 +1,15 @@
+runtime_dir: "{{ playbook_dir }}/runtime"
+opensearch_url: https://localhost:9200
+dashboards_url: http://localhost:5601
+nodes:
+  - name: hot
+    address: 172.30.82.10
+  - name: warm
+    address: 172.30.82.11
+passwords:
+  admin: "{{ lookup('ansible.builtin.password', runtime_dir + '/passwords/admin length=32 chars=ascii_letters,digits') }}"
+  kibanaserver: "{{ lookup('ansible.builtin.password', runtime_dir + '/passwords/kibanaserver length=32 chars=ascii_letters,digits') }}"
+  log_writer: "{{ lookup('ansible.builtin.password', runtime_dir + '/passwords/log_writer length=32 chars=ascii_letters,digits') }}"
+  log_reader: "{{ lookup('ansible.builtin.password', runtime_dir + '/passwords/log_reader length=32 chars=ascii_letters,digits') }}"
+  monitor: "{{ lookup('ansible.builtin.password', runtime_dir + '/passwords/monitor length=32 chars=ascii_letters,digits') }}"
+  grafana: "{{ lookup('ansible.builtin.password', runtime_dir + '/passwords/grafana length=32 chars=ascii_letters,digits') }}"

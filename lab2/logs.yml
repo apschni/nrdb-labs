@@ -1,0 +1,114 @@
+- name: Configure nginx logs
+  hosts: all
+  gather_facts: false
+  vars_files: [vars.yml, logs-config.yml]
+  module_defaults:
+    ansible.builtin.uri:
+      ca_path: "{{ runtime_dir }}/pki/ca.pem"
+      client_cert: "{{ runtime_dir }}/pki/admin.pem"
+      client_key: "{{ runtime_dir }}/pki/admin-key.pem"
+      body_format: json
+      status_code: [200, 201]
+  tasks:
+    - name: Read the existing lifecycle policy
+      ansible.builtin.uri:
+        url: "{{ opensearch_url }}/_plugins/_ism/policies/nginx-retention"
+        status_code: [200, 404]
+      register: existing_policy
+
+    - name: Set the policy update version
+      ansible.builtin.set_fact:
+        policy_version: "{{ '?if_seq_no=' ~ existing_policy.json._seq_no ~ '&if_primary_term=' ~ existing_policy.json._primary_term if existing_policy.status == 200 else '' }}"
+
+    - name: Apply the lifecycle policy
+      ansible.builtin.uri:
+        url: "{{ opensearch_url }}/_plugins/_ism/policies/nginx-retention{{ policy_version }}"
+        method: PUT
+        body: "{{ log_policy }}"
+
+    - name: Apply the log index template
+      ansible.builtin.uri:
+        url: "{{ opensearch_url }}/_index_template/nginx-logs"
+        method: PUT
+        body: "{{ log_template }}"
+
+    - name: Read the data stream
+      ansible.builtin.uri:
+        url: "{{ opensearch_url }}/_data_stream/logs"
+        status_code: [200, 404]
+      register: existing_stream
+
+    - name: Create the data stream
+      ansible.builtin.uri:
+        url: "{{ opensearch_url }}/_data_stream/logs"
+        method: PUT
+      when: existing_stream.status == 404
+
+    - name: Read the backing indexes
+      ansible.builtin.uri:
+        url: "{{ opensearch_url }}/_data_stream/logs"
+      register: log_stream
+
+    - name: Attach the policy to existing backing indexes
+      ansible.builtin.uri:
+        url: "{{ opensearch_url }}/_plugins/_ism/add/{{ item.index_name }}"
+        method: POST
+        body:
+          policy_id: nginx-retention
+      loop: "{{ log_stream.json.data_streams[0].indices }}"
+
+    - name: Write the Logstash password
+      ansible.builtin.copy:
+        dest: "{{ runtime_dir }}/logstash.env"
+        content: "LOGSTASH_PASSWORD={{ passwords.log_writer }}\n"
+        mode: '0600'
+      no_log: true
+
+    - name: Start nginx and Logstash
+      ansible.builtin.command: docker compose up -d --force-recreate nginx logstash
+      args:
+        chdir: "{{ playbook_dir }}"
+      changed_when: true
+
+- name: Configure OpenSearch Dashboards
+  hosts: all
+  gather_facts: false
+  vars_files: [vars.yml]
+  module_defaults:
+    ansible.builtin.uri:
+      url_username: admin
+      url_password: "{{ passwords.admin }}"
+      force_basic_auth: true
+      body_format: json
+      headers:
+        osd-xsrf: 'true'
+  tasks:
+    - name: Read fields for Discover
+      ansible.builtin.uri:
+        url: "{{ dashboards_url }}/api/index_patterns/_fields_for_wildcard?pattern=logs&meta_fields=_source&meta_fields=_id&meta_fields=_index&meta_fields=_score"
+        return_content: true
+      register: discover_fields
+      until: discover_fields.status == 200
+      retries: 90
+      delay: 3
+      no_log: true
+
+    - name: Create the logs index pattern in Discover
+      ansible.builtin.uri:
+        url: "{{ dashboards_url }}/api/saved_objects/index-pattern/logs?overwrite=true"
+        method: POST
+        body:
+          attributes:
+            title: logs
+            timeFieldName: '@timestamp'
+            fields: "{{ discover_fields.json.fields | to_json }}"
+      no_log: true
+
+    - name: Select the default index pattern
+      ansible.builtin.uri:
+        url: "{{ dashboards_url }}/api/opensearch-dashboards/settings"
+        method: POST
+        body:
+          changes:
+            defaultIndex: logs
+      no_log: true

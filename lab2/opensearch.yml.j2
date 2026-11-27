@@ -1,0 +1,26 @@
+cluster.name: nrdb-lab2
+node.name: {{ item.name }}
+node.roles: [cluster_manager, data, ingest]
+node.attr.tier: {{ item.name }}
+network.host: 0.0.0.0
+discovery.seed_hosts: [hot, warm]
+cluster.initial_cluster_manager_nodes: [hot, warm]
+
+plugins.security.ssl.transport.pemcert_filepath: certs/{{ item.name }}.pem
+plugins.security.ssl.transport.pemkey_filepath: certs/{{ item.name }}-key.pem
+plugins.security.ssl.transport.pemtrustedcas_filepath: certs/ca.pem
+plugins.security.ssl.transport.enforce_hostname_verification: true
+plugins.security.ssl.http.enabled: true
+plugins.security.ssl.http.pemcert_filepath: certs/{{ item.name }}.pem
+plugins.security.ssl.http.pemkey_filepath: certs/{{ item.name }}-key.pem
+plugins.security.ssl.http.pemtrustedcas_filepath: certs/ca.pem
+plugins.security.authcz.admin_dn: ["CN=admin"]
+plugins.security.nodes_dn: ["CN=hot", "CN=warm"]
+plugins.security.allow_default_init_securityindex: true
+plugins.security.restapi.roles_enabled: [all_access]
+
+plugins.index_state_management.job_interval: 1
+plugins.index_state_management.jitter: 0
+plugins.index_state_management.history.number_of_replicas: 0
+prometheus.indices: false
+prometheus.cluster.settings: false
