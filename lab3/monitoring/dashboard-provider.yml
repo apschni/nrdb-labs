@@ -1,0 +1,7 @@
+apiVersion: 1
+providers:
+  - name: Redis
+    folder: Lab3
+    type: file
+    options:
+      path: /var/lib/grafana/dashboards
