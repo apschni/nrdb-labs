@@ -1,0 +1,27 @@
+- name: Start Prometheus and Grafana
+  hosts: all
+  gather_facts: false
+  vars_files: [vars.yml]
+  tasks:
+    - name: Write the Prometheus password
+      ansible.builtin.copy:
+        dest: "{{ runtime_dir }}/prometheus-password"
+        content: "{{ passwords.monitor }}"
+        mode: '0644'
+      no_log: true
+
+    - name: Write the Grafana environment
+      ansible.builtin.copy:
+        dest: "{{ runtime_dir }}/grafana.env"
+        content: |
+          GF_SECURITY_ADMIN_USER=admin
+          GF_SECURITY_ADMIN_PASSWORD={{ passwords.grafana }}
+          GF_USERS_ALLOW_SIGN_UP=false
+        mode: '0600'
+      no_log: true
+
+    - name: Start monitoring
+      ansible.builtin.command: docker compose up -d --force-recreate prometheus grafana
+      args:
+        chdir: "{{ playbook_dir }}"
+      changed_when: true

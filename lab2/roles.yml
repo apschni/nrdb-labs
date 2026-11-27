@@ -1,0 +1,64 @@
+- name: Create users and roles
+  hosts: all
+  gather_facts: false
+  vars_files: [vars.yml]
+  module_defaults:
+    ansible.builtin.uri:
+      ca_path: "{{ runtime_dir }}/pki/ca.pem"
+      client_cert: "{{ runtime_dir }}/pki/admin.pem"
+      client_key: "{{ runtime_dir }}/pki/admin-key.pem"
+      body_format: json
+      status_code: [200, 201]
+  tasks:
+    - name: Create the write role
+      ansible.builtin.uri:
+        url: "{{ opensearch_url }}/_plugins/_security/api/roles/logs_write"
+        method: PUT
+        body:
+          cluster_permissions: [indices:data/write/bulk, cluster:monitor/main]
+          index_permissions:
+            - index_patterns: [logs]
+              allowed_actions: [indices:data/write/bulk*, indices:data/write/index]
+
+    - name: Create the read role
+      ansible.builtin.uri:
+        url: "{{ opensearch_url }}/_plugins/_security/api/roles/logs_read"
+        method: PUT
+        body:
+          cluster_permissions: [cluster_composite_ops_ro]
+          index_permissions:
+            - index_patterns: ['logs*']
+              allowed_actions: [read]
+
+    - name: Create the monitoring role
+      ansible.builtin.uri:
+        url: "{{ opensearch_url }}/_plugins/_security/api/roles/metrics_read"
+        method: PUT
+        body:
+          cluster_permissions:
+            - cluster:monitor/health
+            - cluster:monitor/state
+            - cluster:monitor/nodes/info
+            - cluster:monitor/nodes/stats
+            - cluster:monitor/prometheus/metrics
+          index_permissions: []
+
+    - name: Create three users
+      ansible.builtin.uri:
+        url: "{{ opensearch_url }}/_plugins/_security/api/internalusers/{{ item }}"
+        method: PUT
+        body:
+          password: "{{ passwords[item] }}"
+      loop: [log_writer, log_reader, monitor]
+      no_log: true
+
+    - name: Assign roles to users
+      ansible.builtin.uri:
+        url: "{{ opensearch_url }}/_plugins/_security/api/rolesmapping/{{ item.role }}"
+        method: PUT
+        body:
+          users: ["{{ item.user }}"]
+      loop:
+        - {user: log_writer, role: logs_write}
+        - {user: log_reader, role: logs_read}
+        - {user: monitor, role: metrics_read}
